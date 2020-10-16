@@ -68,6 +68,7 @@ type managedPort struct {
 	Exposed    bool
 	Public     bool
 	URL        string
+	OnExposed  api.PortsStatus_ExposedPortInfo_OnPortExposed
 
 	LocalhostPort uint32
 	GlobalPort    uint32
@@ -121,11 +122,7 @@ func (pm *Manager) Run() {
 				return
 			}
 			pm.updateStateWithServedPorts(s)
-		case c := <-configUpdates:
-			if c == nil {
-				log.Error("port configs observer stopped")
-				return
-			}
+		case <-configUpdates:
 			pm.updateStateWithPortConfigs()
 		case err := <-exposedErrors:
 			if err == nil {
@@ -161,15 +158,52 @@ func (pm *Manager) updateStateWithPortConfigs() {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 
+	changes := false
+
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	pm.C.ForEach(func(port uint32, config *gitpod.PortConfig) {
-		mp, exists := pm.state[port]
-		if exists {
-			// TODO if it exposes as private then exposes as public
+	for port, mp := range pm.state {
+		config, exists := pm.C.Get(port)
+		if !exists {
+			continue
+		}
+		if mp.Exposed {
+			onExposed := getOnExposed(config, port)
+			if onExposed != mp.OnExposed {
+				mp.OnExposed = onExposed
+				changes = true
+			}
+		} else {
 			pm.autoExpose(ctx, mp, config)
 		}
-	})
+	}
+
+	if !changes {
+		return
+	}
+	pm.publishStatus()
+}
+
+func getOnExposed(config *gitpod.PortConfig, port uint32) api.PortsStatus_ExposedPortInfo_OnPortExposed {
+	if config == nil {
+		// anything above 32767 seems odd (e.g. used by language servers)
+		unusualRange := !(0 < port && port < 32767)
+		wellKnown := port <= 10000
+		if unusualRange || !wellKnown {
+			return api.PortsStatus_ExposedPortInfo_ignore
+		}
+		return api.PortsStatus_ExposedPortInfo_notify_private
+	}
+	if config.OnOpen == "ignore" {
+		return api.PortsStatus_ExposedPortInfo_ignore
+	}
+	if config.OnOpen == "open-browser" {
+		return api.PortsStatus_ExposedPortInfo_open_browser
+	}
+	if config.OnOpen == "open-preview" {
+		return api.PortsStatus_ExposedPortInfo_open_preview
+	}
+	return api.PortsStatus_ExposedPortInfo_notify
 }
 
 func (pm *Manager) updateStateWithServedPorts(listeningPorts []ServedPort) {
@@ -251,16 +285,54 @@ func (pm *Manager) updateStateWithServedPorts(listeningPorts []ServedPort) {
 }
 
 func (pm *Manager) autoExpose(ctx context.Context, mp *managedPort, config *gitpod.PortConfig) {
+	if mp.Exposed || mp.Internal || mp.IsOurProxy {
+		return
+	}
+
 	if config != nil && config.OnOpen == "ignore" {
 		return
 	}
-	if !mp.Exposed && !mp.Internal && !mp.IsOurProxy {
-		public := config != nil && config.Visibility != "private"
-		err := pm.E.Expose(ctx, mp.LocalhostPort, mp.GlobalPort, public)
-		if err != nil {
-			log.WithError(err).WithField("port", *mp).Warn("cannot auto-expose port")
+
+	public := config != nil && config.Visibility != "private"
+	err := pm.E.Expose(ctx, mp.LocalhostPort, mp.GlobalPort, public)
+	if err != nil {
+		log.WithError(err).WithField("port", *mp).Warn("cannot auto-expose port")
+	}
+}
+
+// Expose exposes a port
+func (pm *Manager) Expose(port uint32, targetPort uint32) string {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+
+	mp, ok := pm.state[port]
+	if ok {
+		if mp.Exposed {
+			return ""
+		}
+		if mp.Internal || mp.IsOurProxy {
+			return "internal port cannot be exposed"
 		}
 	}
+
+	_, exists := pm.C.Get(port)
+	if exists {
+		// will be auto-exposed
+		return ""
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	global := port
+	if targetPort != 0 {
+		global = targetPort
+	}
+	err := pm.E.Expose(ctx, port, global, false)
+	if err == nil {
+		return ""
+	}
+	log.WithError(err).WithField("port", port).WithField("targetPort", targetPort).Error("cannot expose port")
+	return err.Error()
 }
 
 func (pm *Manager) updateStateWithExposedPorts(ports []ExposedPort) {
@@ -279,6 +351,8 @@ func (pm *Manager) updateStateWithExposedPorts(ports []ExposedPort) {
 
 	for _, p := range ports {
 		mp, exists := pm.state[p.LocalPort]
+		config, _ := pm.C.Get(p.LocalPort)
+		onExposed := getOnExposed(config, p.LocalPort)
 		if !exists {
 			mp = &managedPort{
 				Exposed:       true,
@@ -286,6 +360,7 @@ func (pm *Manager) updateStateWithExposedPorts(ports []ExposedPort) {
 				LocalhostPort: p.LocalPort,
 				URL:           p.URL,
 				Public:        p.Public,
+				OnExposed:     onExposed,
 			}
 			pm.state[p.LocalPort] = mp
 			changes = true
@@ -302,6 +377,10 @@ func (pm *Manager) updateStateWithExposedPorts(ports []ExposedPort) {
 		}
 		if mp.URL != p.URL {
 			mp.URL = p.URL
+			changes = true
+		}
+		if onExposed != mp.OnExposed {
+			mp.OnExposed = onExposed
 			changes = true
 		}
 	}
@@ -367,8 +446,9 @@ func (pm *Manager) getStatus() []*api.PortsStatus {
 		}
 		if p.Exposed {
 			ps.Exposed = &api.PortsStatus_ExposedPortInfo{
-				Public: p.Public,
-				Url:    p.URL,
+				Public:    p.Public,
+				Url:       p.URL,
+				OnExposed: p.OnExposed,
 			}
 		}
 		res = append(res, ps)

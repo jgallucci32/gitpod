@@ -17,6 +17,12 @@ import (
 	"github.com/gitpod-io/gitpod/common-go/log"
 )
 
+// ConfigInterface provides an acess to the gitpod config file.
+type ConfigInterface interface {
+	// Observe provides channels triggered whenever the config is changed or errored
+	Observe(ctx context.Context) (<-chan *GitpodConfig, <-chan error)
+}
+
 // ConfigService provides an acess to the gitpod config file.
 type ConfigService struct {
 	location  string
@@ -32,7 +38,7 @@ type configListener struct {
 	errors  chan error
 }
 
-// NewConfigService creates a new instance of GitpodConfigService
+// NewConfigService creates a new instance of ConfigService
 func NewConfigService(configLocation string) *ConfigService {
 	return &ConfigService{
 		location:  configLocation,
@@ -180,7 +186,7 @@ func (service *ConfigService) tryPolling(context context.Context, err error) boo
 		return false
 	}
 	go func() {
-		timer := time.NewTicker(500 * time.Millisecond)
+		timer := time.NewTicker(2 * time.Second)
 		defer timer.Stop()
 
 		for {
