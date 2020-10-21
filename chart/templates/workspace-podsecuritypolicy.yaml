@@ -20,10 +20,9 @@ metadata:
     seccomp.security.alpha.kubernetes.io/defaultProfileName:  'runtime/default'
     apparmor.security.beta.kubernetes.io/defaultProfileName:  'runtime/default'
 spec:
-  #####
-  # The sync containers currently run as root
-  #####
-  ### TODO root sync
+  allowedProcMountTypes:
+  - Unmasked
+  - Default
   privileged: false
   # # Required to prevent escalations to root.
   allowPrivilegeEscalation: false

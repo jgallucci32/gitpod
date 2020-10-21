@@ -388,6 +388,7 @@ func (m *Manager) createDefiniteWorkspacePod(startContext *startWorkspaceContext
 				hostPathOrCreate = corev1.HostPathDirectoryOrCreate
 				daemonVolumeName = "daemon-mount"
 				mountPropagation = corev1.MountPropagationHostToContainer
+				unmaskedProc     = corev1.UnmaskedProcMount
 			)
 			pod.Spec.Volumes = append(pod.Spec.Volumes,
 				corev1.Volume{
@@ -426,6 +427,7 @@ func (m *Manager) createDefiniteWorkspacePod(startContext *startWorkspaceContext
 					},
 				)
 				pod.Spec.Containers[i].Command = []string{pod.Spec.Containers[i].Command[0], "ring0"}
+				pod.Spec.Containers[i].SecurityContext.ProcMount = &unmaskedProc
 				break
 			}
 		case api.WorkspaceFeatureFlag_FULL_WORKSPACE_BACKUP:
